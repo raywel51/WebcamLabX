@@ -20,7 +20,7 @@
 
             <androidx.camera.view.PreviewView
                 android:id="@+id/preview_view"
-                android:layout_width="800dp"
+                android:layout_width="wrap_content"
                 android:layout_height="800dp" />
 
             <LinearLayout
@@ -47,9 +47,15 @@
             </LinearLayout>
         </LinearLayout>
 
-
+        <ImageView
+            android:id="@+id/dummyImage"
+            android:layout_width="800dp"
+            android:layout_height="200dp"
+            android:visibility="gone"
+            tools:ignore="MissingConstraints" />
 
         <ImageView
+            android:id="@+id/iv_show"
             android:layout_width="300dp"
             android:layout_height="300dp"
             app:layout_constraintBottom_toBottomOf="parent"

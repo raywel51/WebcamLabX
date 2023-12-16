@@ -1,4 +1,4 @@
-package th.co.octagon.interactive.letmein_webcam_lab
+package th.co.octagon.interactive.letmein_webcam_lab.ui.activity
 
 import android.Manifest
 import android.annotation.SuppressLint
@@ -8,35 +8,37 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.hardware.camera2.CameraAccessException
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.usb.UsbDevice
-import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbManager
-import android.os.Build
+import android.media.Image
+import android.net.Uri
 import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
-import androidx.annotation.RequiresApi
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalLensFacing
-import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.ViewModelProvider
-import th.co.octagon.interactive.letmein_webcam_lab.camerax.CameraXViewModel
-import th.co.octagon.interactive.letmein_webcam_lab.databinding.ActivityMainBinding
-import java.util.Timer
+import th.co.octagon.interactive.letmein_webcam_lab.databinding.ActivityCameraXBinding
+import java.io.File
+import java.io.IOException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
-class MainActivity : AppCompatActivity() {
+class CameraXViewActivity : AppCompatActivity() {
 
-    private lateinit var binding: ActivityMainBinding
+    private lateinit var binding: ActivityCameraXBinding
+    private var mContext = this@CameraXViewActivity
 
     private lateinit var usbManager: UsbManager
     private lateinit var cameraExecutor: ExecutorService
@@ -48,6 +50,10 @@ class MainActivity : AppCompatActivity() {
     private var cameraSelectorFront: CameraSelector? = null
     private var cameraAvailable: Int? = null
     private var previewUseCase: Preview? = null
+
+    private lateinit var cameraManager: CameraManager
+
+    private var imageCapture: ImageCapture? = null
 
     private val usbPermissionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -80,7 +86,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        binding = ActivityMainBinding.inflate(layoutInflater)
+        binding = ActivityCameraXBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
         usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
@@ -99,12 +105,20 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.btnChange.setOnClickListener {
-            println(cameraAvailable)
+            takePhoto()
         } 
 
         binding.btnCapture.setOnClickListener {
-
+            getCameraDeviceList()
         }
+    }
+
+    fun Image.toBitmap(): Bitmap {
+        val buffer = planes[0].buffer
+        buffer.rewind()
+        val bytes = ByteArray(buffer.capacity())
+        buffer.get(bytes)
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
     }
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
@@ -146,33 +160,64 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun setupCamera() {
-        cameraSelectorBack = CameraSelector.Builder().requireLensFacing(CameraSelector.LENS_FACING_BACK).build()
-        cameraSelectorFront = CameraSelector.Builder().requireLensFacing(CameraSelector.LENS_FACING_FRONT).build()
-
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-
+    @OptIn(ExperimentalLensFacing::class) private fun setupCamera() {
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(mContext)
         cameraProviderFuture.addListener({
-            val provider: ProcessCameraProvider = cameraProviderFuture.get()
+            cameraProvider = cameraProviderFuture.get()
+
+            if (cameraProvider?.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA) == true) {
+                println("System Have DEFAULT_BACK_CAMERA")
+            }
+
+            if (cameraProvider?.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA) == true) {
+                println("System Have DEFAULT_FRONT_CAMERA")
+            }
+
+            val cameraSelector = CameraSelector.Builder()
+                .requireLensFacing(if (cameraProvider?.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA) == true)
+                    CameraSelector.LENS_FACING_BACK
+                else
+                    CameraSelector.LENS_FACING_FRONT
+                )
+                .build()
+
+            println("Select Camera $cameraSelector")
+
+            val cameraView = binding.previewView
+            val preview = Preview.Builder().build()
+            imageCapture = ImageCapture.Builder()
+                .setFlashMode(ImageCapture.FLASH_MODE_AUTO)
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                .build()
+
+            preview.setSurfaceProvider(cameraView.surfaceProvider)
 
             try {
-                // Check if camera permission is granted
-                if (isCameraPermissionGranted()) {
-                    cameraProvider = provider
-                    bindCameraUseCases()
-                } else {
-                    // Request camera permission if not granted
-                    ActivityCompat.requestPermissions(
-                        this,
-                        arrayOf(Manifest.permission.CAMERA),
-                        PERMISSION_CAMERA_REQUEST
-                    )
-                }
-            } catch (e: Exception) {
-                // Handle exceptions
-                e.printStackTrace()
+                cameraProvider?.unbindAll()
+                cameraProvider?.bindToLifecycle(this, cameraSelector, preview, imageCapture)
+            } catch (exc: Exception) {
+                // Handle camera setup error
             }
-        }, ContextCompat.getMainExecutor(this))
+        }, ContextCompat.getMainExecutor(mContext))
+    }
+
+    private fun getCameraDeviceList() {
+
+        cameraManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+
+        try {
+            val cameraIdList = cameraManager.cameraIdList
+
+            for (cameraId in cameraIdList) {
+                val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+                val lensFacing = characteristics.get(CameraCharacteristics.LENS_FACING)
+
+                // Handle camera characteristics as needed
+                Log.d("CameraList", "Camera ID: $cameraId, Lens Facing: $lensFacing")
+            }
+        } catch (e: CameraAccessException) {
+            e.printStackTrace()
+        }
     }
 
     private fun bindCameraUseCases() {
@@ -184,6 +229,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun bindPreviewUseCase() {
+
         if (cameraProvider == null) {
             return
         }
@@ -245,6 +291,49 @@ class MainActivity : AppCompatActivity() {
 
         return result
     }
+
+    private fun takePhoto() {
+        println("click take photo")
+
+        val outputFile = File(this@CameraXViewActivity.externalMediaDirs.first(), "photo.jpg")
+        val outputOptions = ImageCapture.OutputFileOptions.Builder(outputFile).build()
+
+        imageCapture?.takePicture(outputOptions, ContextCompat.getMainExecutor(this@CameraXViewActivity), onImageSavedCallback)
+    }
+
+    private val onImageSavedCallback = object : ImageCapture.OnImageSavedCallback {
+        override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+            val savedUri = outputFileResults.savedUri
+
+            // Convert the saved URI to a Bitmap
+            val bitmap: Bitmap? = savedUri?.toBitmap(mContext)
+            // Use the obtained bitmap as needed
+            if (bitmap != null) {
+                // Do something with the bitmap
+                println("Bitmap is ok")
+                binding.ivShow.setImageBitmap(bitmap)
+            } else {
+                // Handle the case where the bitmap is null
+                println("Bitmap not is ok")
+            }
+        }
+
+        override fun onError(exception: ImageCaptureException) {
+            // Handle image capture error
+        }
+    }
+
+    // Extension function to convert URI to Bitmap
+    fun Uri.toBitmap(context: Context): Bitmap? {
+        return try {
+            val inputStream = context.contentResolver.openInputStream(this)
+            BitmapFactory.decodeStream(inputStream)
+        } catch (e: IOException) {
+            e.printStackTrace()
+            null
+        }
+    }
+
 
     companion object {
         private const val TAG = "MainActivity"
